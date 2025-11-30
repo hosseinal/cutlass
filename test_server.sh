@@ -11,9 +11,29 @@
 # Above are SLURM directives for job scheduling on a cluster
 export SLURM_CONF=/etc/slurm/slurm.conf
 
-source venv/bin/activate
+# Activate virtualenv if present (optional)
+if [ -f "venv/bin/activate" ]; then
+	# shellcheck disable=SC1091
+	source venv/bin/activate
+else
+	echo "No virtualenv found at venv/ — continuing without it"
+fi
 
-mkdir -p build
-cd build 
-cmake .. -DCMAKE_BUILD_TYPE=Release -DCUTLASS_NVCC_ARCHS="80"
-make -j $(nproc)
+# Prefer nvcc from PATH for CMake/CUDA detection if available
+if command -v nvcc >/dev/null 2>&1; then
+	export CUDACXX="$(command -v nvcc)"
+	echo "Using nvcc at ${CUDACXX}"
+else
+	echo "Warning: nvcc not found in PATH — CMake may fail to find CUDA"
+fi
+
+# Configure and build with CMake (use modern -S/-B and explicit standards)
+cmake -S . -B build \
+	-DCMAKE_BUILD_TYPE=Release \
+	-DCUTLASS_NVCC_ARCHS="80" \
+	-DCMAKE_CXX_STANDARD=17 \
+	-DCMAKE_CUDA_STANDARD=17 \
+	-DCMAKE_CXX_EXTENSIONS=OFF \
+	-DCMAKE_CXX_STANDARD_REQUIRED=ON
+
+cmake --build build --parallel $(nproc)
