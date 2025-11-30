@@ -13,4 +13,4 @@ export SLURM_CONF=/etc/slurm/slurm.conf
 
 mkdir -p build
 cd build 
-cmake .. -DCMAKE_BUILD_TYPE=Release -DCUTLASS_NVCC_ARCHS="80"  
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCUTLASS_NVCC_ARCHS="80"   
