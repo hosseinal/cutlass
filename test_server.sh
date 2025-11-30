@@ -11,6 +11,8 @@
 # Above are SLURM directives for job scheduling on a cluster
 export SLURM_CONF=/etc/slurm/slurm.conf
 
+source venv/bin/activate
+
 mkdir -p build
 cd build 
 cmake .. -DCMAKE_BUILD_TYPE=Release -DCUTLASS_NVCC_ARCHS="80"
