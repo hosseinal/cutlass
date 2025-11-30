@@ -27,13 +27,16 @@ else
 	echo "Warning: nvcc not found in PATH — CMake may fail to find CUDA"
 fi
 
-# Configure and build with CMake (use modern -S/-B and explicit standards)
+# Configure with only examples enabled and target Ampere (SM80)
 cmake -S . -B build \
 	-DCMAKE_BUILD_TYPE=Release \
+	-DCUTLASS_ENABLE_EXAMPLES=ON \
 	-DCUTLASS_NVCC_ARCHS="80" \
 	-DCMAKE_CXX_STANDARD=17 \
 	-DCMAKE_CUDA_STANDARD=17 \
 	-DCMAKE_CXX_EXTENSIONS=OFF \
 	-DCMAKE_CXX_STANDARD_REQUIRED=ON
 
-cmake --build build --parallel $(nproc)
+# Build only the two Cute tutorial sgemm examples to avoid building entire tree
+cmake --build build --target cute_tutorial_sgemm_1 --parallel $(nproc)
+cmake --build build --target cute_tutorial_sgemm_2 --parallel $(nproc)
