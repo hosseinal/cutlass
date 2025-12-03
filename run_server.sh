@@ -14,6 +14,8 @@ export SLURM_CONF=/etc/slurm/slurm.conf
 cd build/examples/cute/tutorial/
 
 
+cd build/examples/cute/tutorial/
+
 echo "Running Cute tutorial SGEMM examples cute_tutorial_sgemm_1 512 512 32" > "output.txt"
 ./cute_tutorial_sgemm_1 512 512 32 >> "output.txt"
 echo "Running Cute tutorial SGEMM examples cute_tutorial_sgemm_2 512 512 32" >> "output.txt"
