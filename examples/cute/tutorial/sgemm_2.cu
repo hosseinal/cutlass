@@ -285,10 +285,12 @@ gemm_nt(int m, int n, int k,
   // Each thread will (try to) copy 4x1 elements of type TA using 128-bit copy.
   // Use 32x8 of these threads.
 
-  TiledCopy copyA = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, TA>{},
+  // Use UniversalCopy specialized to the element type so the val-layout
+  // automatically matches the element size (avoids 128-bit atom mismatch for half).
+  TiledCopy copyA = make_tiled_copy(Copy_Atom<UniversalCopy<TA>, TA>{},
                                     Layout<Shape<_32,_8>>{},  // Thr layout 32x8 m-major
                                     Layout<Shape< _4,_1>>{}); // Val layout  4x1 m-major
-  TiledCopy copyB = make_tiled_copy(Copy_Atom<UniversalCopy<uint128_t>, TB>{},
+  TiledCopy copyB = make_tiled_copy(Copy_Atom<UniversalCopy<TB>, TB>{},
                                     Layout<Shape<_32,_8>>{},  // Thr layout 32x8 n-major
                                     Layout<Shape< _4,_1>>{}); // Val layout  4x1 n-major
 
@@ -531,4 +533,4 @@ int main(int argc, char** argv)
   } else {
     return run_main_typed<float, float, float, float>(m, n, k, transA, transB);
   }
-}
+} 
