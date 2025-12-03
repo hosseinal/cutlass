@@ -40,6 +40,7 @@
 #include "cutlass/util/print_error.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
+#include "cutlass/half.h"
 
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class ASmemLayout, class AThreadLayout,
@@ -370,33 +371,10 @@ gemm(char transA, char transB, int m, int n, int k,
 }
 
 
-int main(int argc, char** argv)
+// Templated runner so we can dispatch on numeric types at runtime
+template <class TA, class TB, class TC, class TI>
+int run_main_typed(int m, int n, int k, char transA, char transB)
 {
-  int m = 5120;
-  if (argc >= 2)
-    sscanf(argv[1], "%d", &m);
-
-  int n = 5120;
-  if (argc >= 3)
-    sscanf(argv[2], "%d", &n);
-
-  int k = 4096;
-  if (argc >= 4)
-    sscanf(argv[3], "%d", &k);
-
-  char transA = 'N';
-  if (argc >= 5)
-    sscanf(argv[4], "%c", &transA);
-
-  char transB = 'T';
-  if (argc >= 6)
-    sscanf(argv[5], "%c", &transB);
-
-  using TA = float;
-  using TB = float;
-  using TC = float;
-  using TI = float;
-
   TI alpha = 1.0;
   TI beta  = 0.0;
 
@@ -466,4 +444,37 @@ int main(int argc, char** argv)
   CUTE_CHECK_LAST();
   printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
   return 0;
+}
+
+int main(int argc, char** argv)
+{
+  int m = 5120;
+  if (argc >= 2)
+    sscanf(argv[1], "%d", &m);
+
+  int n = 5120;
+  if (argc >= 3)
+    sscanf(argv[2], "%d", &n);
+
+  int k = 4096;
+  if (argc >= 4)
+    sscanf(argv[3], "%d", &k);
+
+  char transA = 'N';
+  if (argc >= 5)
+    sscanf(argv[4], "%c", &transA);
+
+  char transB = 'T';
+  if (argc >= 6)
+    sscanf(argv[5], "%c", &transB);
+
+  // dtype arg: "f32" (default) or "f16" or "half"
+  std::string dtype = "f32";
+  if (argc >= 7) dtype = argv[6];
+
+  if (dtype == "f16" || dtype == "half") {
+    return run_main_typed<cutlass::half_t, cutlass::half_t, cutlass::half_t, float>(m, n, k, transA, transB);
+  } else {
+    return run_main_typed<float, float, float, float>(m, n, k, transA, transB);
+  }
 }

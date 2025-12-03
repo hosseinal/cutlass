@@ -40,6 +40,7 @@
 #include "cutlass/util/print_error.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
+#include "cutlass/half.h"
 
 template <class ProblemShape, class CtaTiler,
           class TA, class AStride, class ASmemLayout, class TiledCopyA,
@@ -78,104 +79,114 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   CUTE_STATIC_ASSERT_V(congruent(select<0,2>(shape_MNK), dA));         // dA strides for shape MK
   CUTE_STATIC_ASSERT_V(congruent(select<1,2>(shape_MNK), dB));         // dB strides for shape NK
   CUTE_STATIC_ASSERT_V(congruent(select<0,1>(shape_MNK), dC));         // dC strides for shape MN
+// Templated runner so we can dispatch on numeric types at runtime
+template <class TA, class TB, class TC, class TI>
+int run_main_typed(int m, int n, int k, char transA, char transB)
+{
+  TI alpha = 1.0;
+  TI beta  = 0.0;
 
-  //
-  // Full and Tiled Tensors
-  //
+  std::cout << "M = " << m << std::endl;
+  std::cout << "N = " << n << std::endl;
+  std::cout << "K = " << k << std::endl;
+  std::cout << "C = A^" << transA << " B^" << transB << std::endl;
 
-  // Represent the full tensors
-  Tensor mA = make_tensor(make_gmem_ptr(A), select<0,2>(shape_MNK), dA); // (M,K)
-  Tensor mB = make_tensor(make_gmem_ptr(B), select<1,2>(shape_MNK), dB); // (N,K)
-  Tensor mC = make_tensor(make_gmem_ptr(C), select<0,1>(shape_MNK), dC); // (M,N)
+  cute::device_init(0);
 
-  // Get the appropriate blocks for this thread block
-  auto cta_coord = make_coord(blockIdx.x, blockIdx.y, _);              // (m,n,k)
-  Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X,_1>{});  // (BLK_M,BLK_K,k)
-  Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step< X,_1,_1>{});  // (BLK_N,BLK_K,k)
-  Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1,_1, X>{});  // (BLK_M,BLK_N)
+  thrust::host_vector<TA> h_A(m*k);
+  thrust::host_vector<TB> h_B(n*k);
+  thrust::host_vector<TC> h_C(m*n);
 
-  // Shared memory buffers
-  __shared__ TA smemA[cosize_v<ASmemLayout>];
-  __shared__ TB smemB[cosize_v<BSmemLayout>];
-  Tensor sA = make_tensor(make_smem_ptr(smemA), sA_layout);            // (BLK_M,BLK_K)
-  Tensor sB = make_tensor(make_smem_ptr(smemB), sB_layout);            // (BLK_N,BLK_K)
+  for (int j = 0; j < m*k; ++j) h_A[j] = static_cast<TA>( 2*(rand() / double(RAND_MAX)) - 1 );
+  for (int j = 0; j < n*k; ++j) h_B[j] = static_cast<TB>( 2*(rand() / double(RAND_MAX)) - 1 );
+  for (int j = 0; j < m*n; ++j) h_C[j] = static_cast<TC>(-1);
 
-  //
-  // Partition the copying of A and B tiles across the threads
-  //
+  thrust::device_vector<TA> d_A = h_A;
+  thrust::device_vector<TB> d_B = h_B;
+  thrust::device_vector<TC> d_C = h_C;
 
-  // TUTORIAL: Example of partitioning via a TiledCopy
+  double gflops = (2.0*m*n*k) * 1e-9;
 
-  ThrCopy thr_copy_a = copy_a.get_slice(threadIdx.x);
-  Tensor tAgA = thr_copy_a.partition_S(gA);                            // (CPY,CPY_M,CPY_K,k)
-  Tensor tAsA = thr_copy_a.partition_D(sA);                            // (CPY,CPY_M,CPY_K)
-  // Allocate registers same shape/layout as partitioned data
-  Tensor tArA = make_fragment_like(tAsA);                              // (CPY,CPY_M,CPY_K)
+  const int timing_iterations = 100;
+  GPU_Clock timer;
 
-  ThrCopy thr_copy_b = copy_b.get_slice(threadIdx.x);
-  Tensor tBgB = thr_copy_b.partition_S(gB);                            // (CPY,CPY_N,CPY_K,k)
-  Tensor tBsB = thr_copy_b.partition_D(sB);                            // (CPY,CPY_N,CPY_K)
-  // Allocate registers same shape/layout as partitioned data
-  Tensor tBrB = make_fragment_like(tBsB);                              // (CPY,CPY_N,CPY_K)
+  int ldA = 0, ldB = 0, ldC = m;
 
-  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tAsA));                // CPY_M
-  CUTE_STATIC_ASSERT_V(size<1>(tAgA) == size<1>(tArA));                // CPY_M
-  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tAsA));                // CPY_K
-  CUTE_STATIC_ASSERT_V(size<2>(tAgA) == size<2>(tArA));                // CPY_K
-  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBsB));                // CPY_N
-  CUTE_STATIC_ASSERT_V(size<1>(tBgB) == size<1>(tBrB));                // CPY_N
-  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBsB));                // CPY_K
-  CUTE_STATIC_ASSERT_V(size<2>(tBgB) == size<2>(tBrB));                // CPY_K
-
-  // Copy gmem to rmem for k_tile=0
-  copy(copy_a, tAgA(_,_,_,0), tArA);
-  copy(copy_b, tBgB(_,_,_,0), tBrB);
-  //
-  // Define A/B partitioning and C accumulators
-  //
-
-  // TUTORIAL: Example of partitioning via a TiledMMA
-
-  ThrMMA thr_mma = mma.get_slice(threadIdx.x);
-  Tensor tCsA = thr_mma.partition_A(sA);                               // (MMA,MMA_M,MMA_K)
-  Tensor tCsB = thr_mma.partition_B(sB);                               // (MMA,MMA_N,MMA_K)
-  Tensor tCgC = thr_mma.partition_C(gC);                               // (MMA,MMA_M,MMA_N)
-
-  // Allocate the accumulators -- same size as the projected data
-  Tensor tCrC = thr_mma.make_fragment_C(tCgC);                         // (MMA,MMA_M,MMA_N)
-
-  CUTE_STATIC_ASSERT_V(  shape(tCrC) ==   shape(tCgC));                // (MMA,MMA_M,MMA_N)
-  CUTE_STATIC_ASSERT_V(size<1>(tCgC) == size<1>(tCsA));                // MMA_M
-  CUTE_STATIC_ASSERT_V(size<2>(tCgC) == size<1>(tCsB));                // MMA_N
-  CUTE_STATIC_ASSERT_V(size<2>(tCsA) == size<2>(tCsB));                // MMA_K
-
-  // Clear the accumulators
-  clear(tCrC);
-
-#if 0
-  if(thread0()) {
-    print("  mA : "); print(  mA); print("\n");
-    print("  gA : "); print(  gA); print("\n");
-    print("  sA : "); print(  sA); print("\n");
-    print("tAgA : "); print(tAgA); print("\n");
-    print("tAsA : "); print(tAsA); print("\n");
-    print("tArA : "); print(tArA); print("\n");
+  if (transA == 'N') {
+    ldA = m;
+  } else if (transA == 'T') {
+    ldA = k;
+  } else {
+    assert(false);
   }
-#endif
 
-#if 0
-  if(thread0()) {
-    print("  mB : "); print(  mB); print("\n");
-    print("  gB : "); print(  gB); print("\n");
-    print("  sB : "); print(  sB); print("\n");
-    print("tBgB : "); print(tBgB); print("\n");
-    print("tBsB : "); print(tBsB); print("\n");
-    print("tArA : "); print(tArA); print("\n");
+  if (transB == 'N') {
+    ldB = k;
+  } else if (transB == 'T') {
+    ldB = n;
+  } else {
+    assert(false);
   }
-#endif
 
-#if 0
-  if(thread0()) {
+  // Run once
+  d_C = h_C;
+  gemm(transA, transB, m, n, k,
+       alpha,
+       d_A.data().get(), ldA,
+       d_B.data().get(), ldB,
+       beta,
+       d_C.data().get(), ldC);
+  CUTE_CHECK_LAST();
+  thrust::host_vector<TC> cute_result = d_C;
+
+  // Timing iterations
+  timer.start();
+  for (int i = 0; i < timing_iterations; ++i) {
+    gemm(transA, transB, m, n, k,
+         alpha,
+         d_A.data().get(), ldA,
+         d_B.data().get(), ldB,
+         beta,
+         d_C.data().get(), ldC);
+  }
+  double cute_time = timer.seconds() / timing_iterations;
+  CUTE_CHECK_LAST();
+  printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
+  return 0;
+}
+
+int main(int argc, char** argv)
+{
+  int m = 5120;
+  if (argc >= 2)
+    sscanf(argv[1], "%d", &m);
+
+  int n = 5120;
+  if (argc >= 3)
+    sscanf(argv[2], "%d", &n);
+
+  int k = 4096;
+  if (argc >= 4)
+    sscanf(argv[3], "%d", &k);
+
+  char transA = 'N';
+  if (argc >= 5)
+    sscanf(argv[4], "%c", &transA);
+
+  char transB = 'T';
+  if (argc >= 6)
+    sscanf(argv[5], "%c", &transB);
+
+  // dtype arg: "f32" (default) or "f16" or "half"
+  std::string dtype = "f32";
+  if (argc >= 7) dtype = argv[6];
+
+  if (dtype == "f16" || dtype == "half") {
+    return run_main_typed<cutlass::half_t, cutlass::half_t, cutlass::half_t, float>(m, n, k, transA, transB);
+  } else {
+    return run_main_typed<float, float, float, float>(m, n, k, transA, transB);
+  }
+}
     print("  mC : "); print(  mC); print("\n");
     print("  gC : "); print(  gC); print("\n");
     print("tCsA : "); print(tCsA); print("\n");
